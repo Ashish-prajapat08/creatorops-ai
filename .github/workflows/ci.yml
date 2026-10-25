@@ -1,0 +1,74 @@
+name: CreatorOps V0 V1 V2 checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: creatorops
+          POSTGRES_PASSWORD: creatorops
+          POSTGRES_DB: creatorops_test
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U creatorops"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["56379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://creatorops:creatorops@localhost:55432/creatorops_test
+      REDIS_URL: redis://localhost:56379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Backend install
+        run: |
+          python -m venv backend/.venv
+          backend/.venv/bin/pip install -r backend/requirements-dev.lock.txt
+      - name: Backend lint, format, migrations, tests
+        working-directory: backend
+        run: |
+          .venv/bin/ruff check app alembic
+          .venv/bin/ruff format --check app alembic
+          .venv/bin/alembic upgrade head
+          .venv/bin/alembic check
+          .venv/bin/python ../scripts/check_upgrade.py
+          .venv/bin/python ../scripts/check_sources.py
+          .venv/bin/pytest -q
+      - name: Frontend install and checks
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run format:check
+          npm run typecheck
+          npm run lint
+          npm run build
+          npm audit --omit=dev --audit-level=high
+      - name: Primary browser workflow
+        working-directory: frontend
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-evidence
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
